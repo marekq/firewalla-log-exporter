@@ -1,0 +1,5 @@
+.aws-sam/
+samconfig.toml
+lambda/firewalla-log-exporter
+go.mod
+go.sum
