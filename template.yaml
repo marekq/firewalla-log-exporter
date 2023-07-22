@@ -4,32 +4,20 @@ Description: >
   firewalla-exporter
 
 Resources:
+
   FirewallaExporter:
     Type: AWS::Serverless::Function 
     Properties:
-      CodeUri: .
-      Handler: main
+      Handler: exporter
+      CodeUri: lambda/
       Runtime: go1.x
-      MemorySize: 512
-      Timeout: 10
+      MemorySize: 1024
+      Timeout: 60
       Tracing: Active
       ReservedConcurrentExecutions: 1
       Architectures:
       - x86_64
       Environment:
         Variables:
-          AWS_SECRET_NAME: !Ref FirewallaSecret
       Policies:
         - AWSLambdaExecute 
-        - Statement:
-            - Effect: Allow
-              Action:
-              - 'secretsmanager:GetSecretValue'
-              Resource: !Ref FirewallaSecret
-
-  FirewallaSecret:
-    Type: AWS::SecretsManager::Secret
-    Properties:
-      Name: Firewalla_Lambda
-      Description: Axiom and Firewalla API Key
-      SecretString: '{"AXIOM_DATASET": "", "AXIOM_TOKEN": "", "AXIOM_ORG_ID": "", "FIREWALLA_KEY": "", "FIREWALLA_URL": ""}'
