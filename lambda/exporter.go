@@ -29,7 +29,7 @@ var (
 // get flowlogs axiom
 func getAxiomFlowlogs(ctx context.Context, hoursRetrieve int) {
 
-	fmt.Println("* axiom started with dataset:", axiomDataset, " orgID:", axiomOrgID, " token:", axiomToken)
+	fmt.Println("* getAxiomFlowlogs - started with dataset:", axiomDataset, " orgID:", axiomOrgID, " token:", axiomToken)
 
 	// create axiom client
 	axiomClient, err := axiom.NewClient(
@@ -63,40 +63,30 @@ func getAxiomFlowlogs(ctx context.Context, hoursRetrieve int) {
 // get flowlogs axiom first timestamp
 func getAxiomFirstTimestamp(ctx context.Context, axiomClient *axiom.Client, axiomDataset string, hoursRetrieve int) time.Time {
 
-	firstTs := 0
+	now := float64(time.Now().Unix())
+	firstTs := now - float64(hoursRetrieve*3600)
 
 	// get first timestamp from axiom
-	apl := axiomDataset + " | limit 1 | sort by _time desc"
+	apl := "['flowlogs'] | sort by _time desc | limit 1"
 	res, err := axiomClient.Query(ctx, apl)
 
 	if err != nil {
-		log.Fatal("Error querying axiom ", err)
+		log.Fatal("- Error querying axiom ", err, apl)
 
 	} else if len(res.Matches) == 0 {
-		log.Fatal("No matches found")
+		fmt.Println("- No matches found in axiom query ", apl)
 	}
 
 	// get first timestamp from result
-	for _, match := range res.Matches {
+	if len(res.Matches) > 0 {
 
-		// pretty print
-		for k, v := range match.Data {
-
-			if k == "ts" {
-				firstTs = int(v.(float64))
-			}
-		}
+		firstTs = res.Matches[0].Data["ingest_timestamp"].(float64)
 
 	}
 
-	now := float64(time.Now().Unix())
+	fmt.Println("* getAxiomFirstTimestamp - ", time.Unix(int64(firstTs), 0).Format("2006-01-02 15:04:05"))
+	fmt.Println("* getAxiomFirstTimestamp - hours difference from now ", (now-firstTs)/3600)
 
-	// if firstTs is more than 12 hours ago, set to 12 hours ago
-	if now-float64(firstTs) > float64(hoursRetrieve*3600) {
-		firstTs = int(now - float64(hoursRetrieve*3600))
-	}
-
-	fmt.Println("* starting from", time.Unix(int64(firstTs), 0))
 	return time.Unix(int64(firstTs), 0)
 
 }
@@ -144,7 +134,7 @@ func getAxiomFlowlogDetails(ctx context.Context, firewallaClient *http.Client, a
 		furl := firewallaURL + "flows?begin=" + strconv.FormatInt(startTs, 10) + "&end=" + strconv.FormatInt(endTs, 10) + "&limit=1000"
 
 		// print human readable time for start and end
-		fmt.Println("* firewalla start " + startTime.Format("2006-01-02 15:04:05") + " end " + endTime.Format("2006-01-02 15:04:05"))
+		fmt.Println("* getAxiomFlowlogDetails start " + startTime.Format("2006-01-02 15:04:05") + " end " + endTime.Format("2006-01-02 15:04:05"))
 
 		// get flow logs for specific hour (startTs to endTs)
 		body := makeGetRequest(
@@ -158,23 +148,22 @@ func getAxiomFlowlogDetails(ctx context.Context, firewallaClient *http.Client, a
 		for _, flowlog := range body.Results {
 
 			completedFlowlogs++
-
 			nowTs := time.Now().Unix()
 
 			// add to postEvent
 			postEvent = append(postEvent, axiom.Event{
-				ingest.TimestampField: flowlog.Ts,
-				"event_timestamp":     int(flowlog.Ts),
-				"ingest_timestamp":    int(nowTs),
+				ingest.TimestampField: int64(flowlog.Ts),
+				"event_timestamp":     int64(flowlog.Ts),
+				"ingest_timestamp":    int64(nowTs),
 				"ip":                  flowlog.Device.IP,
 				"device_name":         flowlog.Device.Name,
 				"device_port":         flowlog.Device.Port,
-				"device_id":           flowlog.Device.ID,
-				"device_network_id":   flowlog.Device.Network.ID,
+				"device_id":           flowlog.Device.Id,
+				"device_network_id":   flowlog.Device.Network.Id,
 				"device_network_name": flowlog.Device.Network.Name,
-				"device_group_id":     flowlog.Device.Group.ID,
+				"device_group_id":     flowlog.Device.Group.Id,
 				"device_group_name":   flowlog.Device.Group.Name,
-				"remote_ip":           flowlog.Remote.IP,
+				"remote_ip":           flowlog.Remote.Ip,
 				"remote_domain":       flowlog.Remote.Domain,
 				"remote_port":         flowlog.Remote.Port,
 				"remote_country":      flowlog.Remote.Country,
@@ -182,26 +171,31 @@ func getAxiomFlowlogDetails(ctx context.Context, firewallaClient *http.Client, a
 				"protocol":            flowlog.Protocol,
 				"direction":           flowlog.Direction,
 				"block":               flowlog.Block,
-				"count":               int(flowlog.Count),
+				"count":               flowlog.Count,
 				"download":            flowlog.Download,
 				"upload":              flowlog.Upload,
 				"duration":            flowlog.Duration,
 			})
 
 			// if flowlog ts is less than minTs, set minTs to flowlog ts
-			if flowlog.Ts > minTs {
-				minTs = flowlog.Ts
+			if flowlog.Ts > float64(minTs) {
+				minTs = int64(flowlog.Ts)
 				startTs = minTs
 
 			}
 		}
 
-		_, err := axiomClient.IngestEvents(ctx, axiomDataset, postEvent)
+		_, err := axiomClient.IngestEvents(
+			ctx,
+			axiomDataset,
+			postEvent,
+		)
+
 		if err != nil {
-			log.Fatal("Error ingesting events ", err)
+			log.Fatal("- Error ingesting events ", err)
 		}
 
-		fmt.Println("ingested " + strconv.Itoa(len(postEvent)) + " flowlogs, completed " + strconv.Itoa(completedFlowlogs) + " flowlogs, minTs " + strconv.FormatInt(int64(minTs), 10))
+		fmt.Println("* getAxiomFlowlogDetails ingested " + strconv.Itoa(len(postEvent)) + " flowlogs, completed " + strconv.Itoa(completedFlowlogs) + " flowlogs, minTs " + strconv.FormatInt(int64(minTs), 10))
 
 		// get record count
 		recordCount := len(body.Results)
@@ -213,7 +207,7 @@ func getAxiomFlowlogDetails(ctx context.Context, firewallaClient *http.Client, a
 		}
 	}
 
-	fmt.Println("Done with " + strconv.Itoa(completedFlowlogs) + " flowlogs")
+	fmt.Println("* getAxiomFlowlogDetails - Done with " + strconv.Itoa(completedFlowlogs) + " flowlogs")
 	return nil
 
 }
@@ -227,7 +221,7 @@ func processEvent(event json.RawMessage) (Event, error) {
 
 	err := json.Unmarshal(event, &e)
 	if err != nil {
-		fmt.Println(err)
+		fmt.Println("- Error unmarshalling input event ", err)
 		return e, err
 	}
 
@@ -242,10 +236,10 @@ func handler(ctx context.Context, event json.RawMessage) {
 
 	e, err := processEvent(event)
 	if err != nil {
-		fmt.Println("Error processing input event ", err)
+		fmt.Println("- Error processing input event ", err)
 	}
 
-	fmt.Println("Retrieving flowlogs from Firewalla for the last " + strconv.Itoa(e.HoursRetrieve) + " hours")
+	fmt.Println("* lambdaHandler - getting flowlogs for last " + strconv.Itoa(e.HoursRetrieve) + " hours")
 	getAxiomFlowlogs(ctx, e.HoursRetrieve)
 
 }
@@ -257,47 +251,37 @@ func main() {
 //////////////////////////
 
 type Response struct {
-	Results []Result `json:"results"`
-	Count   int      `json:"count"`
-	Next    float64  `json:"next"`
-}
-
-type Result struct {
-	Ts        int64   `json:"ts"`
-	Gid       string  `json:"gid"`
-	Protocol  string  `json:"protocol"`
-	Direction string  `json:"direction"`
-	Block     bool    `json:"block"`
-	Count     int     `json:"count"`
-	Download  int     `json:"download"`
-	Upload    int     `json:"upload"`
-	Duration  float64 `json:"duration"`
-	Device    Device  `json:"device"`
-	Remote    Remote  `json:"remote"`
-}
-
-type Device struct {
-	IP      string  `json:"ip"`
-	Name    string  `json:"name"`
-	Port    int     `json:"port"`
-	ID      string  `json:"id"`
-	Network Network `json:"network"`
-	Group   Group   `json:"group"`
-}
-
-type Network struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-}
-
-type Group struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-}
-
-type Remote struct {
-	IP      string `json:"ip"`
-	Domain  string `json:"domain"`
-	Port    int    `json:"port"`
-	Country string `json:"country"`
+	Results []struct {
+		Ts        float64 `json:"ts"`
+		Gid       string  `json:"gid"`
+		Protocol  string  `json:"protocol"`
+		Direction string  `json:"direction"`
+		Block     bool    `json:"block"`
+		Count     int     `json:"count"`
+		Download  int     `json:"download"`
+		Upload    int     `json:"upload"`
+		Duration  float64 `json:"duration"`
+		Device    struct {
+			IP      string `json:"ip"`
+			Name    string `json:"name"`
+			Port    int    `json:"port"`
+			Id      string `json:"id"`
+			Network struct {
+				Id   string `json:"id"`
+				Name string `json:"name"`
+			} `json:"network"`
+			Group struct {
+				Id   string `json:"id"`
+				Name string `json:"name"`
+			} `json:"group"`
+		} `json:"device"`
+		Remote struct {
+			Ip      string `json:"ip"`
+			Domain  string `json:"domain"`
+			Port    int    `json:"port"`
+			Country string `json:"country"`
+		} `json:"remote"`
+	} `json:"results"`
+	Count int     `json:"count"`
+	Next  float64 `json:"next"`
 }

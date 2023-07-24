@@ -12,7 +12,7 @@ Resources:
       CodeUri: lambda/
       Runtime: go1.x
       MemorySize: 1024
-      Timeout: 60
+      Timeout: 180
       Tracing: Active
       ReservedConcurrentExecutions: 1
       Architectures:
@@ -21,3 +21,8 @@ Resources:
         Variables:
       Policies:
         - AWSLambdaExecute 
+      Events:
+        Schedule:
+          Type: Schedule
+          Properties:
+            Schedule: rate(1 hour)
