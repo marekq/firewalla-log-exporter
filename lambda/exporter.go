@@ -24,6 +24,8 @@ var (
 	axiomToken      = os.Getenv("AXIOM_TOKEN")
 	firewallaURL    = os.Getenv("FIREWALLA_URL")
 	firewallaAPIKey = os.Getenv("FIREWALLA_KEY")
+	timeZone, _     = time.LoadLocation("Europe/Amsterdam")
+	timeFormat      = "2006-01-02 15:04:05"
 )
 
 // get flowlogs axiom
@@ -67,7 +69,7 @@ func getAxiomFirstTimestamp(ctx context.Context, axiomClient *axiom.Client, axio
 	firstTs := now - float64(hoursRetrieve*3600)
 
 	// get first timestamp from axiom
-	apl := "['flowlogs'] | sort by _time desc | limit 1"
+	apl := axiomDataset + " | order by _time desc | limit 1"
 	res, err := axiomClient.Query(ctx, apl)
 
 	if err != nil {
@@ -80,12 +82,21 @@ func getAxiomFirstTimestamp(ctx context.Context, axiomClient *axiom.Client, axio
 	// get first timestamp from result
 	if len(res.Matches) > 0 {
 
-		firstTs = res.Matches[0].Data["ingest_timestamp"].(float64)
+		foundTsStr := res.Matches[0].Data["ingest_timestamp"]
 
+		t, err := time.Parse(timeFormat, foundTsStr.(string))
+		if err != nil {
+			log.Fatal("- Error parsing timestamp ", err, foundTsStr)
+		}
+		foundTs := float64(t.Unix())
+
+		if float64(foundTs) > firstTs {
+			firstTs = foundTs
+		}
 	}
 
-	fmt.Println("* getAxiomFirstTimestamp - ", time.Unix(int64(firstTs), 0).Format("2006-01-02 15:04:05"))
-	fmt.Println("* getAxiomFirstTimestamp - hours difference from now ", (now-firstTs)/3600)
+	fmt.Println("* getAxiomFirstTimestamp - got last timestamp from axiom ", time.Unix(int64(firstTs), 0).In(timeZone).Format(timeFormat))
+	fmt.Printf("* getAxiomFirstTimestamp - hours difference from now %.2f\n", (now-firstTs)/3600)
 
 	return time.Unix(int64(firstTs), 0)
 
@@ -134,7 +145,7 @@ func getAxiomFlowlogDetails(ctx context.Context, firewallaClient *http.Client, a
 		furl := firewallaURL + "flows?begin=" + strconv.FormatInt(startTs, 10) + "&end=" + strconv.FormatInt(endTs, 10) + "&limit=1000"
 
 		// print human readable time for start and end
-		fmt.Println("* getAxiomFlowlogDetails start " + startTime.Format("2006-01-02 15:04:05") + " end " + endTime.Format("2006-01-02 15:04:05"))
+		fmt.Println("* getAxiomFlowlogDetails - start " + startTime.In(timeZone).Format(timeFormat) + " end " + endTime.In(timeZone).Format(timeFormat))
 
 		// get flow logs for specific hour (startTs to endTs)
 		body := makeGetRequest(
@@ -147,44 +158,50 @@ func getAxiomFlowlogDetails(ctx context.Context, firewallaClient *http.Client, a
 
 		for _, flowlog := range body.Results {
 
-			completedFlowlogs++
 			nowTs := time.Now().Unix()
 
-			// add to postEvent
-			postEvent = append(postEvent, axiom.Event{
-				ingest.TimestampField: int64(flowlog.Ts),
-				"event_timestamp":     int64(flowlog.Ts),
-				"ingest_timestamp":    int64(nowTs),
-				"ip":                  flowlog.Device.IP,
-				"device_name":         flowlog.Device.Name,
-				"device_port":         flowlog.Device.Port,
-				"device_id":           flowlog.Device.Id,
-				"device_network_id":   flowlog.Device.Network.Id,
-				"device_network_name": flowlog.Device.Network.Name,
-				"device_group_id":     flowlog.Device.Group.Id,
-				"device_group_name":   flowlog.Device.Group.Name,
-				"remote_ip":           flowlog.Remote.Ip,
-				"remote_domain":       flowlog.Remote.Domain,
-				"remote_port":         flowlog.Remote.Port,
-				"remote_country":      flowlog.Remote.Country,
-				"gid":                 flowlog.Gid,
-				"protocol":            flowlog.Protocol,
-				"direction":           flowlog.Direction,
-				"block":               flowlog.Block,
-				"count":               flowlog.Count,
-				"download":            flowlog.Download,
-				"upload":              flowlog.Upload,
-				"duration":            flowlog.Duration,
-			})
+			// if not empty
+			if flowlog.Device.IP != "" {
 
-			// if flowlog ts is less than minTs, set minTs to flowlog ts
-			if flowlog.Ts > float64(minTs) {
-				minTs = int64(flowlog.Ts)
-				startTs = minTs
+				completedFlowlogs++
 
+				// add to postEvent
+				postEvent = append(postEvent, axiom.Event{
+					ingest.TimestampField: time.Unix(int64(flowlog.Ts), 0).Format(timeFormat),
+					"event_timestamp":     time.Unix(int64(flowlog.Ts), 0).Format(timeFormat),
+					"ingest_timestamp":    time.Unix(int64(nowTs), 0).Format(timeFormat),
+					"ip":                  flowlog.Device.IP,
+					"device_name":         flowlog.Device.Name,
+					"device_port":         flowlog.Device.Port,
+					"device_id":           flowlog.Device.Id,
+					"device_network_id":   flowlog.Device.Network.Id,
+					"device_network_name": flowlog.Device.Network.Name,
+					"device_group_id":     flowlog.Device.Group.Id,
+					"device_group_name":   flowlog.Device.Group.Name,
+					"remote_ip":           flowlog.Remote.Ip,
+					"remote_domain":       flowlog.Remote.Domain,
+					"remote_port":         flowlog.Remote.Port,
+					"remote_country":      flowlog.Remote.Country,
+					"gid":                 flowlog.Gid,
+					"protocol":            flowlog.Protocol,
+					"direction":           flowlog.Direction,
+					"block":               flowlog.Block,
+					"count":               flowlog.Count,
+					"download":            flowlog.Download,
+					"upload":              flowlog.Upload,
+					"duration":            flowlog.Duration,
+				})
+
+				// if flowlog ts is less than minTs, set minTs to flowlog ts
+				if flowlog.Ts > float64(minTs) {
+					minTs = int64(flowlog.Ts)
+					startTs = minTs
+
+				}
 			}
 		}
 
+		// ingest axiom events
 		_, err := axiomClient.IngestEvents(
 			ctx,
 			axiomDataset,
@@ -195,19 +212,16 @@ func getAxiomFlowlogDetails(ctx context.Context, firewallaClient *http.Client, a
 			log.Fatal("- Error ingesting events ", err)
 		}
 
-		fmt.Println("* getAxiomFlowlogDetails ingested " + strconv.Itoa(len(postEvent)) + " flowlogs, completed " + strconv.Itoa(completedFlowlogs) + " flowlogs, minTs " + strconv.FormatInt(int64(minTs), 10))
-
-		// get record count
-		recordCount := len(body.Results)
+		fmt.Println("* getAxiomFlowlogDetails - ingested " + strconv.Itoa(len(postEvent)) + " flowlogs")
 
 		// if record count is less than 1000, break
-		if recordCount < 1000 || body.Next == 0 {
+		if body.Count < 1000 || body.Next == 0 {
 
 			break
 		}
 	}
 
-	fmt.Println("* getAxiomFlowlogDetails - Done with " + strconv.Itoa(completedFlowlogs) + " flowlogs")
+	fmt.Println("* getAxiomFlowlogDetails - done with " + strconv.Itoa(completedFlowlogs) + " flowlogs")
 	return nil
 
 }
