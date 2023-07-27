@@ -10,13 +10,13 @@ Resources:
     Properties:
       Handler: exporter
       CodeUri: lambda/
-      Runtime: go1.x
+      Runtime: provided.al2
       MemorySize: 1024
-      Timeout: 180
+      Timeout: 30
       Tracing: Active
       ReservedConcurrentExecutions: 1
       Architectures:
-      - x86_64
+      - arm64
       Environment:
         Variables:
       Policies:
