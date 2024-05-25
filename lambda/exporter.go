@@ -14,6 +14,12 @@ import (
 	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/axiomhq/axiom-go/axiom"
 	"github.com/axiomhq/axiom-go/axiom/ingest"
+
+	lambdadetector "go.opentelemetry.io/contrib/detectors/aws/lambda"
+	"go.opentelemetry.io/contrib/instrumentation/github.com/aws/aws-lambda-go/otellambda"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
 // read axiom config from env variables
@@ -45,6 +51,10 @@ func getAxiomFlowlogs(ctx context.Context, hoursRetrieve int) {
 	// create firewalla client
 	firewallaClient := &http.Client{
 		Timeout: time.Second * 10,
+		Transport: otelhttp.NewTransport(
+			http.DefaultTransport,
+			otelhttp.WithTracerProvider(otel.GetTracerProvider()),
+		),
 	}
 
 	// create firstTs and lastTs
@@ -58,7 +68,7 @@ func getAxiomFlowlogs(ctx context.Context, hoursRetrieve int) {
 	endTime := time.Unix(lastTs, 0)
 
 	// get flowlog details
-	getAxiomFlowlogDetails(ctx, firewallaClient, axiomClient, startTime, endTime, completedFlowlogs)
+	getAxiomFlowlogDetails(ctx, *firewallaClient, axiomClient, startTime, endTime, completedFlowlogs)
 
 }
 
@@ -103,7 +113,7 @@ func getAxiomFirstTimestamp(ctx context.Context, axiomClient *axiom.Client, axio
 }
 
 // make post request to api, return body
-func makeGetRequest(url string, client *http.Client) Response {
+func makeGetRequest(url string, client http.Client) Response {
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
@@ -134,7 +144,7 @@ func makeGetRequest(url string, client *http.Client) Response {
 }
 
 // get flowlog details axiom
-func getAxiomFlowlogDetails(ctx context.Context, firewallaClient *http.Client, axiomClient *axiom.Client, startTime time.Time, endTime time.Time, completedFlowlogs int) error {
+func getAxiomFlowlogDetails(ctx context.Context, firewallaClient http.Client, axiomClient *axiom.Client, startTime time.Time, endTime time.Time, completedFlowlogs int) error {
 
 	startTs := startTime.Unix()
 	endTs := endTime.Unix()
@@ -142,7 +152,7 @@ func getAxiomFlowlogDetails(ctx context.Context, firewallaClient *http.Client, a
 
 	for {
 
-		furl := firewallaURL + "flows?begin=" + strconv.FormatInt(startTs, 10) + "&end=" + strconv.FormatInt(endTs, 10) + "&limit=1000"
+		furl := firewallaURL + "flows?begin=" + strconv.FormatInt(startTs, 10) + "&end=" + strconv.FormatInt(endTs, 10) + "&limit=500"
 
 		// print human readable time for start and end
 		fmt.Println("* getAxiomFlowlogDetails - start " + startTime.In(timeZone).Format(timeFormat) + " end " + endTime.In(timeZone).Format(timeFormat))
@@ -222,6 +232,7 @@ func getAxiomFlowlogDetails(ctx context.Context, firewallaClient *http.Client, a
 	}
 
 	fmt.Println("* getAxiomFlowlogDetails - done with " + strconv.Itoa(completedFlowlogs) + " flowlogs")
+
 	return nil
 
 }
@@ -230,36 +241,31 @@ type Event struct {
 	HoursRetrieve int `json:"hoursRetrieve"`
 }
 
-func processEvent(event json.RawMessage) (Event, error) {
-	var e Event
+func Handler(ctx context.Context) {
 
-	err := json.Unmarshal(event, &e)
-	if err != nil {
-		fmt.Println("- Error unmarshalling input event ", err)
-		return e, err
-	}
-
-	if e.HoursRetrieve == 0 {
-		e.HoursRetrieve = 1
-	}
-
-	return e, nil
-}
-
-func handler(ctx context.Context, event json.RawMessage) {
-
-	e, err := processEvent(event)
-	if err != nil {
-		fmt.Println("- Error processing input event ", err)
-	}
-
-	fmt.Println("* lambdaHandler - getting flowlogs for last " + strconv.Itoa(e.HoursRetrieve) + " hours")
-	getAxiomFlowlogs(ctx, e.HoursRetrieve)
+	// get for 12 hours
+	getAxiomFlowlogs(ctx, 12)
 
 }
 
 func main() {
-	lambda.Start(handler)
+
+	ctx := context.Background()
+
+	detector := lambdadetector.NewResourceDetector()
+	res, err := detector.Detect(ctx)
+	if err != nil {
+		log.Fatalf("failed to detect lambda resources: %v\n", err)
+		return
+	}
+
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithResource(res),
+	)
+
+	otel.SetTracerProvider(tp)
+	lambda.Start(otellambda.InstrumentHandler(Handler, otellambda.WithTracerProvider(tp)))
+
 }
 
 //////////////////////////
