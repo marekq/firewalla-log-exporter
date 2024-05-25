@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"time"
@@ -37,7 +38,7 @@ var (
 // get flowlogs axiom
 func getAxiomFlowlogs(ctx context.Context, hoursRetrieve int) {
 
-	fmt.Println("* getAxiomFlowlogs - started with dataset:", axiomDataset, " orgID:", axiomOrgID, " token:", axiomToken)
+	fmt.Println("* getAxiomFlowlogs - started with dataset:", axiomDataset, " orgID:", axiomOrgID, " token:", axiomToken, " hoursRetrieve:", hoursRetrieve)
 
 	// create axiom client
 	axiomClient, err := axiom.NewClient(
@@ -61,14 +62,14 @@ func getAxiomFlowlogs(ctx context.Context, hoursRetrieve int) {
 	firstTs := getAxiomFirstTimestamp(ctx, axiomClient, axiomDataset, hoursRetrieve).Unix()
 	lastTs := time.Now().Unix()
 
-	completedFlowlogs := 0
-
 	// start and end time of the full hour
 	startTime := time.Unix(firstTs, 0)
 	endTime := time.Unix(lastTs, 0)
 
 	// get flowlog details
-	getAxiomFlowlogDetails(ctx, *firewallaClient, axiomClient, startTime, endTime, completedFlowlogs)
+	countRetrieved := getAxiomFlowlogDetails(ctx, *firewallaClient, axiomClient, startTime, endTime)
+
+	fmt.Println("* getAxiomFlowlogs - completed with dataset:", axiomDataset, " orgID:", axiomOrgID, " token:", axiomToken, " retrieved:", countRetrieved, " flowlogs")
 
 }
 
@@ -104,9 +105,6 @@ func getAxiomFirstTimestamp(ctx context.Context, axiomClient *axiom.Client, axio
 			firstTs = foundTs
 		}
 	}
-
-	fmt.Println("* getAxiomFirstTimestamp - got last timestamp from axiom ", time.Unix(int64(firstTs), 0).In(timeZone).Format(timeFormat))
-	fmt.Printf("* getAxiomFirstTimestamp - hours difference from now %.2f\n", (now-firstTs)/3600)
 
 	return time.Unix(int64(firstTs), 0)
 
@@ -144,18 +142,23 @@ func makeGetRequest(url string, client http.Client) Response {
 }
 
 // get flowlog details axiom
-func getAxiomFlowlogDetails(ctx context.Context, firewallaClient http.Client, axiomClient *axiom.Client, startTime time.Time, endTime time.Time, completedFlowlogs int) error {
+func getAxiomFlowlogDetails(ctx context.Context, firewallaClient http.Client, axiomClient *axiom.Client, startTime time.Time, endTime time.Time) int {
 
+	completedFlowlogs := 0
 	startTs := startTime.Unix()
 	endTs := endTime.Unix()
 	minTs := int64(startTs)
 
+	cursor := ""
+	groupBy := "ts,status,box,source,sourceIP,sport,device,network,destination,destinationIP,dport,domain,protocol,category,region,direction,blockType,upload,download,total,count"
+	encodedGroupBy := "groupBy=" + url.QueryEscape(groupBy)
+
+	// print human readable time for start and end
+	fmt.Println("start " + startTime.In(timeZone).Format(timeFormat) + " \nend   " + endTime.In(timeZone).Format(timeFormat) + " \ndiff  " + strconv.Itoa(int(endTime.Sub(startTime).Seconds())) + " seconds")
+
 	for {
 
-		furl := firewallaURL + "flows?begin=" + strconv.FormatInt(startTs, 10) + "&end=" + strconv.FormatInt(endTs, 10) + "&limit=500"
-
-		// print human readable time for start and end
-		fmt.Println("* getAxiomFlowlogDetails - start " + startTime.In(timeZone).Format(timeFormat) + " end " + endTime.In(timeZone).Format(timeFormat))
+		furl := firewallaURL + "flows?query=ts%3A" + strconv.FormatInt(startTs, 10) + "-" + strconv.FormatInt(endTs, 10) + "&sortBy=ts&limit=500&" + encodedGroupBy + "&cursor=" + url.QueryEscape(cursor)
 
 		// get flow logs for specific hour (startTs to endTs)
 		body := makeGetRequest(
@@ -165,6 +168,7 @@ func getAxiomFlowlogDetails(ctx context.Context, firewallaClient http.Client, ax
 
 		// create new minTs as float64
 		postEvent := []axiom.Event{}
+		cursor = body.NextCursor
 
 		for _, flowlog := range body.Results {
 
@@ -177,34 +181,44 @@ func getAxiomFlowlogDetails(ctx context.Context, firewallaClient http.Client, ax
 
 				// add to postEvent
 				postEvent = append(postEvent, axiom.Event{
-					ingest.TimestampField: time.Unix(int64(flowlog.Ts), 0).Format(timeFormat),
-					"event_timestamp":     time.Unix(int64(flowlog.Ts), 0).Format(timeFormat),
+					ingest.TimestampField: time.Unix(int64(flowlog.TS), 0).Format(timeFormat),
+					"event_timestamp":     time.Unix(int64(flowlog.TS), 0).Format(timeFormat),
 					"ingest_timestamp":    time.Unix(int64(nowTs), 0).Format(timeFormat),
-					"ip":                  flowlog.Device.IP,
-					"device_name":         flowlog.Device.Name,
-					"device_port":         flowlog.Device.Port,
-					"device_id":           flowlog.Device.Id,
-					"device_network_id":   flowlog.Device.Network.Id,
-					"device_network_name": flowlog.Device.Network.Name,
-					"device_group_id":     flowlog.Device.Group.Id,
-					"device_group_name":   flowlog.Device.Group.Name,
-					"remote_ip":           flowlog.Remote.Ip,
-					"remote_domain":       flowlog.Remote.Domain,
-					"remote_port":         flowlog.Remote.Port,
-					"remote_country":      flowlog.Remote.Country,
-					"gid":                 flowlog.Gid,
+					"gid":                 flowlog.GID,
 					"protocol":            flowlog.Protocol,
 					"direction":           flowlog.Direction,
 					"block":               flowlog.Block,
-					"count":               flowlog.Count,
+					"blockType":           flowlog.BlockType,
 					"download":            flowlog.Download,
 					"upload":              flowlog.Upload,
 					"duration":            flowlog.Duration,
+					"count":               flowlog.Count,
+					"device": map[string]interface{}{
+						"id":   flowlog.Device.ID,
+						"ip":   flowlog.Device.IP,
+						"name": flowlog.Device.Name,
+					},
+					"source": map[string]interface{}{
+						"id":   flowlog.Source.ID,
+						"name": flowlog.Source.Name,
+						"ip":   flowlog.Source.IP,
+					},
+					"destination": map[string]interface{}{
+						"id":   flowlog.Destination.ID,
+						"name": flowlog.Destination.Name,
+						"ip":   flowlog.Destination.IP,
+					},
+					"region":   flowlog.Region,
+					"category": flowlog.Category,
+					"network": map[string]interface{}{
+						"id":   flowlog.Network.ID,
+						"name": flowlog.Network.Name,
+					},
 				})
 
 				// if flowlog ts is less than minTs, set minTs to flowlog ts
-				if flowlog.Ts > float64(minTs) {
-					minTs = int64(flowlog.Ts)
+				if flowlog.TS > float64(minTs) {
+					minTs = int64(flowlog.TS)
 					startTs = minTs
 
 				}
@@ -212,6 +226,7 @@ func getAxiomFlowlogDetails(ctx context.Context, firewallaClient http.Client, ax
 		}
 
 		// ingest axiom events
+		fmt.Println("* axiomClient.IngestEvents - count ", len(postEvent))
 		_, err := axiomClient.IngestEvents(
 			ctx,
 			axiomDataset,
@@ -222,18 +237,14 @@ func getAxiomFlowlogDetails(ctx context.Context, firewallaClient http.Client, ax
 			log.Fatal("- Error ingesting events ", err)
 		}
 
-		fmt.Println("* getAxiomFlowlogDetails - ingested " + strconv.Itoa(len(postEvent)) + " flowlogs")
-
-		// if record count is less than 1000, break
-		if body.Count < 1000 || body.Next == 0 {
+		// if record count is less than 500, break
+		if body.Count < 500 || body.NextCursor == "" {
 
 			break
 		}
 	}
 
-	fmt.Println("* getAxiomFlowlogDetails - done with " + strconv.Itoa(completedFlowlogs) + " flowlogs")
-
-	return nil
+	return completedFlowlogs
 
 }
 
@@ -272,36 +283,38 @@ func main() {
 
 type Response struct {
 	Results []struct {
-		Ts        float64 `json:"ts"`
-		Gid       string  `json:"gid"`
+		TS        float64   `json:"ts"`
+		GID       string  `json:"gid"`
 		Protocol  string  `json:"protocol"`
 		Direction string  `json:"direction"`
 		Block     bool    `json:"block"`
+		BlockType *string `json:"blockType,omitempty"`
+		Download  *int64  `json:"download,omitempty"`
+		Upload    *int64  `json:"upload,omitempty"`
+		Duration  *int64  `json:"duration,omitempty"`
 		Count     int     `json:"count"`
-		Download  int     `json:"download"`
-		Upload    int     `json:"upload"`
-		Duration  float64 `json:"duration"`
 		Device    struct {
-			IP      string `json:"ip"`
-			Name    string `json:"name"`
-			Port    int    `json:"port"`
-			Id      string `json:"id"`
-			Network struct {
-				Id   string `json:"id"`
-				Name string `json:"name"`
-			} `json:"network"`
-			Group struct {
-				Id   string `json:"id"`
-				Name string `json:"name"`
-			} `json:"group"`
+			ID   string `json:"id"`
+			IP   string `json:"ip"`
+			Name string `json:"name"`
 		} `json:"device"`
-		Remote struct {
-			Ip      string `json:"ip"`
-			Domain  string `json:"domain"`
-			Port    int    `json:"port"`
-			Country string `json:"country"`
-		} `json:"remote"`
+		Source struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+			IP   string `json:"ip"`
+		} `json:"source,omitempty"`
+		Destination struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+			IP   string `json:"ip"`
+		} `json:"destination,omitempty"`
+		Region   *string `json:"region,omitempty"`
+		Category *string `json:"category,omitempty"`
+		Network  struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"network"`
 	} `json:"results"`
-	Count int     `json:"count"`
-	Next  float64 `json:"next"`
+	Count      int    `json:"count"`
+	NextCursor string `json:"next_cursor"`
 }
