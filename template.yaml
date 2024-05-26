@@ -19,6 +19,11 @@ Resources:
       - arm64
       Environment:
         Variables:
+          AXIOM_DATASET: 
+          AXIOM_TOKEN: 
+          AXIOM_ORG_ID: 
+          FIREWALLA_KEY: 
+          FIREWALLA_URL:
       Policies:
         - AWSLambdaExecute 
       Events:
